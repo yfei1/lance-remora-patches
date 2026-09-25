@@ -4,7 +4,7 @@
 //! Extension to arrow struct arrays
 
 use arrow_array::{Array, StructArray, cast::AsArray, make_array};
-use arrow_buffer::NullBuffer;
+use arrow_buffer::{BooleanBufferBuilder, NullBuffer};
 use arrow_data::{ArrayData, ArrayDataBuilder};
 use arrow_schema::ArrowError;
 
@@ -103,18 +103,23 @@ impl StructArrayExt for StructArray {
             .child_data()
             .iter()
             .map(|c| {
-                if let Some(child_validity) = c.nulls() {
-                    let new_validity = child_validity.inner() & validity.inner();
-                    c.clone()
-                        .into_builder()
-                        .nulls(Some(NullBuffer::from(new_validity)))
-                        .build()
+                let mut new_validity = if let Some(child_validity) = c.nulls() {
+                    NullBuffer::from(child_validity.inner() & validity.inner())
                 } else {
-                    Ok(c.clone()
-                        .into_builder()
-                        .nulls(Some(validity.clone()))
-                        .build()?)
+                    validity.clone()
+                };
+                // Arrow validates the bitmap against the child data offset.
+                // Boolean slices retain that offset, while AND returns offset zero.
+                if c.offset() != new_validity.offset() {
+                    let mut bits = BooleanBufferBuilder::new(c.offset() + c.len());
+                    bits.append_n(c.offset(), false);
+                    bits.append_buffer(new_validity.inner());
+                    new_validity = NullBuffer::new(bits.finish().slice(c.offset(), c.len()));
                 }
+                c.clone()
+                    .into_builder()
+                    .nulls(Some(new_validity))
+                    .build()
             })
             .collect::<Result<Vec<_>, _>>()?;
         let arr = make_array(data.into_builder().child_data(children).build()?);
