@@ -3375,7 +3375,7 @@ pub struct PrimitiveStructuralEncoder {
 
 struct CompressedLevelsChunk {
     data: LanceBuffer,
-    num_levels: u16,
+    num_levels: u64,
 }
 
 struct CompressedLevels {
@@ -3507,7 +3507,7 @@ impl PrimitiveStructuralEncoder {
         miniblocks: MiniBlockCompressed,
         rep: Option<Vec<CompressedLevelsChunk>>,
         def: Option<Vec<CompressedLevelsChunk>>,
-    ) -> SerializedMiniBlockPage {
+    ) -> Option<SerializedMiniBlockPage> {
         let bytes_rep = rep
             .as_ref()
             .map(|rep| rep.iter().map(|r| r.data.len()).sum::<usize>())
@@ -3546,15 +3546,16 @@ impl PrimitiveStructuralEncoder {
                 .as_ref()
                 .map(|r| r.num_levels)
                 .unwrap_or(def.as_ref().map(|d| d.num_levels).unwrap_or(0));
+            let num_levels = u16::try_from(num_levels).ok()?;
             data_buffer.extend_from_slice(&num_levels.to_le_bytes());
 
             // Write the buffer lengths
             if let Some(rep) = rep.as_ref() {
-                let bytes_rep = u16::try_from(rep.data.len()).unwrap();
+                let bytes_rep = u16::try_from(rep.data.len()).ok()?;
                 data_buffer.extend_from_slice(&bytes_rep.to_le_bytes());
             }
             if let Some(def) = def.as_ref() {
-                let bytes_def = u16::try_from(def.data.len()).unwrap();
+                let bytes_def = u16::try_from(def.data.len()).ok()?;
                 data_buffer.extend_from_slice(&bytes_def.to_le_bytes());
             }
 
@@ -3592,7 +3593,10 @@ impl PrimitiveStructuralEncoder {
             }
 
             let chunk_bytes = data_buffer.len() - start_pos;
-            assert!(chunk_bytes <= 32 * 1024);
+            // The v2.1 metadata has only 12 size bits in units of eight bytes.
+            if chunk_bytes > 32 * 1024 {
+                return None;
+            }
             assert!(chunk_bytes > 0);
             assert_eq!(chunk_bytes % 8, 0);
             // We subtract 1 here from chunk_bytes because we want to be able to express
@@ -3608,11 +3612,11 @@ impl PrimitiveStructuralEncoder {
         let data_buffer = LanceBuffer::from(data_buffer);
         let metadata_buffer = LanceBuffer::from(meta_buffer);
 
-        SerializedMiniBlockPage {
+        Some(SerializedMiniBlockPage {
             num_buffers: miniblocks.data.len() as u64,
             data: data_buffer,
             metadata: metadata_buffer,
-        }
+        })
     }
 
     /// Compresses a buffer of levels into chunks
@@ -3722,7 +3726,7 @@ impl PrimitiveStructuralEncoder {
             let compressed_levels = compressor.compress(chunk_levels_block)?;
             level_chunks.push(CompressedLevelsChunk {
                 data: compressed_levels,
-                num_levels: num_chunk_levels as u16,
+                num_levels: num_chunk_levels,
             });
         }
         debug_assert_eq!(levels.num_levels_remaining(), 0);
@@ -3797,7 +3801,7 @@ impl PrimitiveStructuralEncoder {
         row_number: u64,
         dictionary_data: Option<DataBlock>,
         num_rows: u64,
-    ) -> Result<EncodedPage> {
+    ) -> Result<Option<EncodedPage>> {
         let repdef = RepDefBuilder::serialize(repdefs);
 
         if let DataBlock::AllNull(_null_block) = data {
@@ -3857,7 +3861,9 @@ impl PrimitiveStructuralEncoder {
             .as_mut()
             .map(|cd| std::mem::take(&mut cd.data));
 
-        let serialized = Self::serialize_miniblocks(compressed_data, rep_data, def_data);
+        let Some(serialized) = Self::serialize_miniblocks(compressed_data, rep_data, def_data) else {
+            return Ok(None);
+        };
 
         // Metadata, Data, Dictionary, (maybe) Repetition Index
         let mut data = Vec::with_capacity(4);
@@ -3888,13 +3894,13 @@ impl PrimitiveStructuralEncoder {
                 &repdef.def_meaning,
                 num_items,
             );
-            Ok(EncodedPage {
+            Ok(Some(EncodedPage {
                 num_rows,
                 column_idx,
                 data,
                 description: PageEncoding::Structural(description),
                 row_number,
-            })
+            }))
         } else {
             let description = ProtobufUtils21::miniblock_layout(
                 compressed_rep.map(|cr| cr.compression),
@@ -3915,13 +3921,13 @@ impl PrimitiveStructuralEncoder {
                 data.push(rep_index);
             }
 
-            Ok(EncodedPage {
+            Ok(Some(EncodedPage {
                 num_rows,
                 column_idx,
                 data,
                 description: PageEncoding::Structural(description),
                 row_number,
-            })
+            }))
         }
     }
 
@@ -4394,7 +4400,7 @@ impl PrimitiveStructuralEncoder {
                 );
             }
 
-            if let DataBlock::Dictionary(dict) = data_block {
+            let encoded = if let DataBlock::Dictionary(dict) = data_block {
                 log::debug!("Encoding column {} with {} items using dictionary encoding (already dictionary encoded)", column_idx, num_values);
                 let (mut indices_data_block, dictionary_data_block) = dict.into_parts();
                 // TODO: https://github.com/lancedb/lance/issues/4809
@@ -4407,7 +4413,7 @@ impl PrimitiveStructuralEncoder {
                     &field,
                     compression_strategy.as_ref(),
                     indices_data_block,
-                    repdefs,
+                    repdefs.clone(),
                     row_number,
                     Some(dictionary_data_block),
                     num_rows
@@ -4425,7 +4431,7 @@ impl PrimitiveStructuralEncoder {
                     &field,
                     compression_strategy.as_ref(),
                     indices_data_block,
-                    repdefs,
+                    repdefs.clone(),
                     row_number,
                     Some(dictionary_data_block),
                     num_rows,
@@ -4441,7 +4447,7 @@ impl PrimitiveStructuralEncoder {
                     &field,
                     compression_strategy.as_ref(),
                     data_block,
-                    repdefs,
+                    repdefs.clone(),
                     row_number,
                     None,
                     num_rows,
@@ -4457,13 +4463,28 @@ impl PrimitiveStructuralEncoder {
                     &field,
                     compression_strategy.as_ref(),
                     data_block,
-                    repdefs,
+                    repdefs.clone(),
                     row_number,
                     num_rows,
-                )
+                ).map(Some)
             } else {
                 Err(Error::InvalidInput { source: format!("Cannot determine structural encoding for field {}.  This typically indicates an invalid value of the field metadata key {}", field.name, STRUCTURAL_ENCODING_META_KEY).into(), location: location!() })
+            }?;
+            if let Some(page) = encoded {
+                return Ok(page);
             }
+            // Sparse rep/def levels can exceed a miniblock even when its values are small.
+            // Rebuild from the original arrays, so dictionary values are never replaced by indices.
+            log::debug!("Encoding column {} with full-zip because a miniblock exceeds v2.1 metadata", column_idx);
+            Self::encode_full_zip(
+                column_idx,
+                &field,
+                compression_strategy.as_ref(),
+                DataBlock::from_arrays(&arrays, num_values),
+                repdefs,
+                row_number,
+                num_rows,
+            )
         })
         .boxed();
         Ok(vec![task])
