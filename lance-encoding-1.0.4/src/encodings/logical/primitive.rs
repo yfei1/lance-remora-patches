@@ -937,7 +937,33 @@ impl DecodeComplexAllNullTask {
 }
 
 impl DecodePageTask for DecodeComplexAllNullTask {
-    fn decode(self: Box<Self>) -> Result<DecodedPage> {
+    fn decode(mut self: Box<Self>) -> Result<DecodedPage> {
+        // Requested ranges contain root rows. Nested lists can have several levels per row.
+        // Use the same mapping as the regular decoder before slicing either level buffer.
+        if let Some(rep) = &self.rep {
+            let max_rep = self.def_meaning.iter().filter(|level| level.is_list()).count() as u16;
+            let total_items = self.def.as_ref().map_or(rep.len(), |def| {
+                def.iter()
+                    .filter(|level| **level <= self.max_visible_level)
+                    .count()
+            }) as u64;
+            self.ranges = self
+                .ranges
+                .iter()
+                .map(|range| {
+                    DecodeMiniBlockTask::map_range(
+                        range.clone(),
+                        self.rep.as_ref(),
+                        self.def.as_ref(),
+                        max_rep,
+                        self.max_visible_level,
+                        total_items,
+                        PreambleAction::Absent,
+                    )
+                    .1
+                })
+                .collect();
+        }
         let num_values = self.ranges.iter().map(|r| r.end - r.start).sum::<u64>();
         let rep = self.decode_level(&self.rep, num_values);
         let def = self.decode_level(&self.def, num_values);
