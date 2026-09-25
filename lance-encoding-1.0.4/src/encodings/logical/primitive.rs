@@ -4164,6 +4164,20 @@ impl PrimitiveStructuralEncoder {
         let bits_rep = repdef_iter.bits_rep();
         let bits_def = repdef_iter.bits_def();
 
+        // Full-zip requires byte-aligned values. Keep the logical Boolean field.
+        let data = match data {
+            DataBlock::FixedWidth(fixed) if fixed.bits_per_value == 1 => {
+                let num_values = fixed.num_values;
+                let values = BooleanBuffer::new(fixed.data.into_buffer(), 0, num_values as usize);
+                DataBlock::FixedWidth(FixedWidthDataBlock {
+                    data: LanceBuffer::from(values.iter().map(u8::from).collect::<Vec<_>>()),
+                    bits_per_value: 8,
+                    num_values,
+                    block_info: BlockInfo::new(),
+                })
+            }
+            other => other,
+        };
         let compressor = compression_strategy.create_per_value(field, &data)?;
         let (compressed_data, value_encoding) = compressor.compress(data)?;
 
