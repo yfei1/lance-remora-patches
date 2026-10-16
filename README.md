@@ -25,6 +25,7 @@ The branch `main` holds the earlier Lance 1.0.4 patch set.
 | --- | --- | --- | --- |
 | `a0e06c8` | lance-arrow | `pushdown_nulls` aligns with the child data offset | Local; absent from v12.0.0 and main |
 | `a92733b` | lance-encoding | `do_record_validity` counts special entries | Same change as #9268; only in v13.0.0-beta.3 and later |
+| `871cd76` | lance-encoding | `ZstdBufferCompressor::compress` reserves the bound instead of zero-filling it; the compressed bytes are the same | The compress half of #9918; in v14.0.0-beta.16 and later, not in v13.0.0 (checked 2026-10-16) |
 
 ## Corrections that this branch drops
 
@@ -38,7 +39,7 @@ The 1.0.4 set on `main` had five more corrections. This branch does not carry th
 | `52d7149` | lance-encoding | Booleans expand to bytes for full-zip | The remora checks pass on 12.0.0 without it |
 | `7495d31` | lance-linalg | AVX-512 kernel builds with `-mavx512f` | Upstream #7121 is in v8.0.0 and later; remora no longer patches lance-linalg |
 
-MEASURED on 2026-09-25: the six remora checks below pass at `a92733b`, which has only the two corrections above.
+MEASURED on 2026-09-25: the six remora checks below pass at `a92733b`, which has only the corrections `a0e06c8` and `a92733b`.
 
 Issue and pull-request numbers refer to https://github.com/lance-format/lance.
 Lance 12.0.0 needs Arrow 58 and DataFusion 54.
