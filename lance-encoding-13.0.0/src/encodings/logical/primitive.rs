@@ -7984,11 +7984,16 @@ impl FieldEncoder for PrimitiveStructuralEncoder {
         num_rows: u64,
     ) -> Result<Vec<EncodeTask>> {
         let array = Self::extract_validity(array, &mut repdef, self.keep_original_array)?;
+        // The queue keeps each batch's levels until it flushes, so they count toward its cache.
+        let repdef_bytes = repdef.memory_size() as u64;
         self.accumulated_repdefs.push(repdef);
 
-        if let Some((arrays, row_number, num_rows)) =
-            self.accumulation_queue.insert(array, row_number, num_rows)
-        {
+        if let Some((arrays, row_number, num_rows)) = self.accumulation_queue.insert_with_side_bytes(
+            array,
+            repdef_bytes,
+            row_number,
+            num_rows,
+        ) {
             let accumulated_repdefs = std::mem::take(&mut self.accumulated_repdefs);
             Ok(self.do_flush(arrays, accumulated_repdefs, row_number, num_rows)?)
         } else {

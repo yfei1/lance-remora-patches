@@ -1261,6 +1261,23 @@ impl RepDefBuilder {
         self.repdefs.len()
     }
 
+    /// The bytes of the offsets and the validity bitmaps that this builder keeps.
+    pub fn memory_size(&self) -> usize {
+        let validity = |validity: &Option<BooleanBuffer>| {
+            validity.as_ref().map_or(0, |validity| validity.inner().len())
+        };
+        self.repdefs
+            .iter()
+            .map(|layer| match layer {
+                RawRepDef::Offsets(desc) => {
+                    desc.offsets.len() * std::mem::size_of::<i64>() + validity(&desc.validity)
+                }
+                RawRepDef::Validity(desc) => validity(&desc.validity),
+                RawRepDef::Fsl(desc) => validity(&desc.validity),
+            })
+            .sum()
+    }
+
     /// The builder is "empty" if there is no repetition and no nulls.  In this case we don't need
     /// to store anything to disk (except the description)
     pub fn is_empty(&self) -> bool {

@@ -42,11 +42,24 @@ impl AccumulationQueue {
         row_number: u64,
         num_rows: u64,
     ) -> Option<(Vec<ArrayRef>, u64, u64)> {
+        self.insert_with_side_bytes(array, 0, row_number, num_rows)
+    }
+
+    /// Like [`Self::insert`], for an array whose caller also keeps `side_bytes` for it until
+    /// the flush, such as its repetition and definition levels. Those bytes count toward the
+    /// cache, so a column whose arrays hold no values still flushes.
+    pub fn insert_with_side_bytes(
+        &mut self,
+        array: ArrayRef,
+        side_bytes: u64,
+        row_number: u64,
+        num_rows: u64,
+    ) -> Option<(Vec<ArrayRef>, u64, u64)> {
         if self.row_number == u64::MAX {
             self.row_number = row_number;
         }
         self.num_rows += num_rows;
-        self.current_bytes += array.get_array_memory_size() as u64;
+        self.current_bytes += array.get_array_memory_size() as u64 + side_bytes;
         if self.current_bytes > self.cache_bytes {
             debug!(
                 "Flushing column {} page of size {} bytes (unencoded)",
