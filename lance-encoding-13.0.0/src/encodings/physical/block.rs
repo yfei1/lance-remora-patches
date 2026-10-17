@@ -154,6 +154,15 @@ mod zstd {
     use ::zstd::bulk::{Compressor, decompress_to_buffer};
     use ::zstd::stream::copy_decode;
 
+    /// Appends into `buf`'s spare capacity (reserved by the caller) without
+    /// zero-filling it first; zstd writes the bytes and the cursor sets the length.
+    fn append_cursor(buf: &mut Vec<u8>) -> Cursor<&mut Vec<u8>> {
+        let start = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        cursor.set_position(start);
+        cursor
+    }
+
     /// A zstd buffer compressor that lazily creates and reuses compression contexts.
     ///
     /// The compression context is cached to enable reuse across chunks within a
@@ -260,18 +269,12 @@ mod zstd {
         fn compress(&self, input_buf: &[u8], output_buf: &mut Vec<u8>) -> Result<()> {
             output_buf.write_all(&(input_buf.len() as u64).to_le_bytes())?;
 
-            let max_compressed_size = ::zstd::zstd_safe::compress_bound(input_buf.len());
-            let start_pos = output_buf.len();
-            output_buf.resize(start_pos + max_compressed_size, 0);
-
-            let compressed_size = self
-                .get_compressor()?
+            output_buf.reserve(::zstd::zstd_safe::compress_bound(input_buf.len()));
+            self.get_compressor()?
                 .lock()
                 .unwrap()
-                .compress_to_buffer(input_buf, &mut output_buf[start_pos..])
+                .compress_to_buffer(input_buf, &mut append_cursor(output_buf))
                 .map_err(|e| Error::internal(format!("Zstd compression error: {}", e)))?;
-
-            output_buf.truncate(start_pos + compressed_size);
             Ok(())
         }
 
@@ -766,6 +769,88 @@ mod tests {
                 input_data_2,
                 "Second part of decompressed data should match input_2"
             );
+        }
+
+        /// The compress of 12.0.0, which zero-fills the bound before zstd writes into it.
+        fn compress_zero_filled(level: i32, input_buf: &[u8], output_buf: &mut Vec<u8>) {
+            output_buf
+                .write_all(&(input_buf.len() as u64).to_le_bytes())
+                .unwrap();
+            let max_compressed_size = ::zstd::zstd_safe::compress_bound(input_buf.len());
+            let start_pos = output_buf.len();
+            output_buf.resize(start_pos + max_compressed_size, 0);
+            let compressed_size = ::zstd::bulk::Compressor::new(level)
+                .unwrap()
+                .compress_to_buffer(input_buf, &mut output_buf[start_pos..])
+                .unwrap();
+            output_buf.truncate(start_pos + compressed_size);
+        }
+
+        /// `len` bytes that zstd cannot compress, the same on each run (xorshift64).
+        fn incompressible(len: usize) -> Vec<u8> {
+            let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+            (0..len)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 7;
+                    state ^= state << 17;
+                    state.to_le_bytes()[0]
+                })
+                .collect()
+        }
+
+        /// The inputs of the byte check: an empty value, one small value, and values above 32 KiB,
+        /// the size at which Lance picks general compression for a block
+        /// (`MIN_BLOCK_SIZE_FOR_GENERAL_COMPRESSION`).
+        fn inputs() -> Vec<Vec<u8>> {
+            let text = (0..4_000)
+                .map(|index| format!("{{\"contract\":{index},\"size\":{}}},", index % 7))
+                .collect::<String>()
+                .into_bytes();
+            assert!(text.len() > 32 * 1024);
+            vec![
+                Vec::new(),
+                b"Hello, world!".to_vec(),
+                text,
+                incompressible(40 * 1024),
+                vec![7; 1024 * 1024],
+            ]
+        }
+
+        #[test]
+        fn test_zstd_compress_writes_the_bytes_of_the_zero_filled_compress() {
+            for level in [0, 3] {
+                let compressor = ZstdBufferCompressor::new(level);
+                for input in inputs() {
+                    let (mut reserved, mut zero_filled) = (Vec::new(), Vec::new());
+                    compressor.compress(&input, &mut reserved).unwrap();
+                    compress_zero_filled(level, &input, &mut zero_filled);
+                    assert_eq!(reserved, zero_filled, "level {level}, {} bytes", input.len());
+                }
+            }
+        }
+
+        #[test]
+        fn test_zstd_compress_appends_after_earlier_values_and_round_trips() {
+            let compressor = ZstdBufferCompressor::new(0);
+            let (mut reserved, mut zero_filled) = (b"earlier".to_vec(), b"earlier".to_vec());
+            let mut ends = Vec::new();
+            for input in inputs() {
+                compressor.compress(&input, &mut reserved).unwrap();
+                compress_zero_filled(0, &input, &mut zero_filled);
+                ends.push(reserved.len());
+            }
+            assert_eq!(reserved, zero_filled);
+
+            let mut start = b"earlier".len();
+            for (input, end) in inputs().into_iter().zip(ends) {
+                let mut decompressed = Vec::new();
+                compressor
+                    .decompress(&reserved[start..end], &mut decompressed)
+                    .unwrap();
+                assert_eq!(decompressed, input, "{} bytes", input.len());
+                start = end;
+            }
         }
 
         #[test]
